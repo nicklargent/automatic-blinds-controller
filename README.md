@@ -13,6 +13,15 @@ The design is powered by an ardunio nano powered by wall USB and triggered by a 
 
 I intended to minimize the design further with a custom board and 3D enclosure, but my reality is that this has operated flawlessly for 6 months and has been hidded behind curtains.
 
+## Usage
+
+1. Upon powering on, the device is in calibration mode.  The buttons are used to rotate the blinds in one direction or the other.  
+2. Use the buttons to position the blinds to your preferred 'open' position.  Press both buttons together to set the position.  
+3. Now use the buttons to rotate the blinds into your prefered 'closed' position and then press both buttons again.  
+4. The system is now calibrated and will open / close the blinds based on the light level detected (make sure the light sensor is positioned outside of the blinds.)  
+5. While in this mode, holding either button for 4 seconds will toggle the current state (open/closed).
+
+
 ## Images
 
 ![Project Photo](/images/rev2_electronics.jpg)
