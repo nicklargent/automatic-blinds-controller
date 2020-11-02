@@ -21,6 +21,10 @@ I intended to minimize the design further with a custom board and 3D enclosure, 
 4. The system is now calibrated and will open / close the blinds based on the light level detected (make sure the light sensor is positioned outside of the blinds.)  
 5. While in this mode, holding either button for 4 seconds will toggle the current state (open/closed).
 
+## Parts
+
+This design is built around an Ardunio Nano, 28BYJ-48 stepper motor, ULN2003 driver board, and common phototransistor.  
+
 
 ## Images
 
