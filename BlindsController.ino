@@ -1,7 +1,14 @@
+#include <EEPROM.h>
 #include <Stepper.h>
 
 // change this to the number of steps on your motor
 #define STEPS_PER_REV 2038 
+
+struct eeprom_config {
+  int version;
+  long fullStepCount;
+  long currentStepCount;
+};
 
 const int sensorMin = 370;
 const int sensorMax = 1020;
@@ -20,14 +27,19 @@ const int LED_PIN = LED_BUILTIN; //6;
 // the number of steps of the motor and the pins it's
 // attached to
 Stepper stepper(STEPS_PER_REV, 8, 10, 9, 11);
-bool blindsOpen = false;
 bool blindOverride = false;
 int trendCount = 0;
-
-long stepCount = 0;  // number of steps the motor has taken
 bool stepCountSet = false;
+long targetStepCount = 0;
 
-int mode = 1;
+eeprom_config config;
+
+
+enum MODE {
+  SETUP,
+  NORMAL
+};
+MODE mode = NORMAL;
 
 
 void setup() {  
@@ -40,43 +52,76 @@ void setup() {
   pinMode(BUTTON1_PIN, INPUT_PULLUP);
   pinMode(BUTTON2_PIN, INPUT_PULLUP);
 
-  // test
-  //stepCount = 47320;
-  //blindsOpen = true;
-  //mode = 2;
+  // load config & state from eeprom
+  EEPROM.get( offsetof(eeprom_config, version), config.version );
+  EEPROM.get( offsetof(eeprom_config, fullStepCount), config.fullStepCount);
+  EEPROM.get( offsetof(eeprom_config, currentStepCount), config.currentStepCount);
+  if (config.version == 1) {
+    targetStepCount = config.currentStepCount;
+  } else {
+    targetStepCount = config.currentStepCount = config.fullStepCount = 0;
+    mode = SETUP;
+  }
+
+
+  // check if we need to enter setup mode or go straight into normal mode
+  int button1 = digitalRead(BUTTON1_PIN);
+  int button2 = digitalRead(BUTTON2_PIN);
+  if (button1 == LOW || button2 == LOW) {
+    mode = SETUP;
+  }
 }
 
 void motorOff() {
+  Sprintln("Motor off");
   digitalWrite(8,LOW);
   digitalWrite(9,LOW);
   digitalWrite(10,LOW);
   digitalWrite(11,LOW);
 }
 
+bool blindsOpen() {
+  return (targetStepCount == 0);
+}
+
 void openBlinds() {
   Sprintln("Opening Blinds...");
-  long stepsRemaining = stepCount;
-  while (stepsRemaining > 0) {
-    int steps = STEPS_PER_REV / 100;
-    stepper.step(steps);
-    stepsRemaining -= steps;
-  }
-  motorOff();
-  blindsOpen = true;
+  targetStepCount = 0;
   trendCount = 0;
 }
 
 void closeBlinds() {
   Sprintln("Closing Blinds...");
-  long stepsRemaining = stepCount;
-  while (stepsRemaining > 0) {
-    int steps = STEPS_PER_REV / 100;
-    stepper.step(-steps);
-    stepsRemaining -= steps;
-  }  
-  motorOff();
-  blindsOpen = false;
+  targetStepCount = config.fullStepCount;
   trendCount = 0;
+}
+
+bool doSteps() {
+  int steps = 0;
+  if (config.currentStepCount < targetStepCount) {
+    steps = STEPS_PER_REV / 100;
+    if (config.currentStepCount + steps > targetStepCount)
+      steps = targetStepCount - config.currentStepCount;
+  } else if (config.currentStepCount > targetStepCount) {
+    steps = STEPS_PER_REV / -100;
+    if (config.currentStepCount + steps < targetStepCount)
+      steps = targetStepCount - config.currentStepCount;
+  }
+
+  if (steps != 0) {
+    Sprint("STEPPING ");
+    Sprintln(steps);
+    stepper.step(steps);
+    config.currentStepCount += steps;
+
+    if (config.currentStepCount == targetStepCount) {
+        Sprintln("At target position.  Saving...");
+        motorOff();
+        EEPROM.put( offsetof(eeprom_config, currentStepCount), config.currentStepCount);
+    }
+    return true;
+  }
+  return false;
 }
 
 
@@ -84,7 +129,7 @@ void closeBlinds() {
 // Move blinds to the open position and press both buttons to reset step count.
 // Move blinds to the closed position and press both buttons to set step count.
 // Moves into mode2 after second button..
-void mode1_loop() {
+void setup_loop() {
   // read the button states:
   int button1 = digitalRead(BUTTON1_PIN);
   int button2 = digitalRead(BUTTON2_PIN);
@@ -92,7 +137,7 @@ void mode1_loop() {
   Sprint("MODE 1:  B1: ");
   Sprint(button1); Sprint("   B2: ");
   Sprint(button2); Sprint("   STEP_CT: ");
-  Sprintln(stepCount);
+  Sprintln(config.fullStepCount);
 
   if (stepCountSet)
     digitalWrite(LED_PIN, (millis() / 500) % 2);
@@ -101,10 +146,10 @@ void mode1_loop() {
 
   // set the motor speed:
   if (button1 == LOW && button2 == HIGH) {
-    stepCount += (STEPS_PER_REV / 100);
+    config.fullStepCount += (STEPS_PER_REV / 100);
     stepper.step(STEPS_PER_REV / 100);
   } else if (button1 == HIGH && button2 == LOW) {
-    stepCount += (STEPS_PER_REV / -100);
+    config.fullStepCount += (STEPS_PER_REV / -100);
     stepper.step(STEPS_PER_REV / -100);
   } else {
     motorOff();
@@ -112,13 +157,16 @@ void mode1_loop() {
     if (button1 == LOW && button2 == LOW) {
       if (!stepCountSet) {
         Sprintln("Step count reset");
-        stepCount = 0;
+        config.fullStepCount = 0;
         stepCountSet = true;
-        delay(2000);
+        delay(500);
       } else {
-        stepCount = abs(stepCount);
         Sprintln("Calibration complete.");
-        mode = 2;
+        targetStepCount = config.currentStepCount = config.fullStepCount;
+        EEPROM.put( offsetof(eeprom_config, fullStepCount), config.fullStepCount);
+        EEPROM.put( offsetof(eeprom_config, currentStepCount), config.currentStepCount);  
+
+        mode = NORMAL;
         digitalWrite(LED_PIN, 0);
         delay(500);
       }
@@ -129,14 +177,14 @@ void mode1_loop() {
 }
 
 
-void mode2_loop() {
+void normal_loop() {
   int button1 = digitalRead(BUTTON1_PIN);
   int button2 = digitalRead(BUTTON2_PIN);
   
   int analogValue = analogRead(PHOTOCELL_PIN);
   int value = map(analogValue, sensorMin, sensorMax, 0, 100);
   Sprint("MODE 2:  ");
-  if (blindsOpen)
+  if (blindsOpen())
     Sprint("OPEN  ");
   else
     Sprint("CLOSED  ");
@@ -149,15 +197,16 @@ void mode2_loop() {
   if (button1 == LOW || button2 == LOW) {
     blindOverride = !blindOverride;
     digitalWrite(LED_PIN, blindOverride);
+    delay(1000);
     
-    if (blindsOpen)
+    if (blindsOpen())
       closeBlinds();
     else
       openBlinds();
   }
   
   if (!blindOverride) {
-    if (blindsOpen) {
+    if (blindsOpen()) {
       if (value < TRANSITION_LEVEL)
         trendCount ++;
       else
@@ -178,17 +227,20 @@ void mode2_loop() {
     }
   }
   
-  delay (1000);
+  if (doSteps())
+    delay (10);
+  else
+    delay (1000);
 }
 
 
 void loop() {
   switch (mode) {
-    case 1:
-      mode1_loop();
+    case SETUP:
+      setup_loop();
       break;
-    case 2:
-      mode2_loop();
+    case NORMAL:
+      normal_loop();
       break;
   }
 }
