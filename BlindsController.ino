@@ -45,7 +45,7 @@ MODE mode = NORMAL;
 void setup() {  
   Serial.begin(9600);
 
-  stepper.setSpeed(15);
+  stepper.setSpeed(13);
 
   pinMode(LED_BUILTIN, OUTPUT);
   pinMode(LED_PIN, OUTPUT);
@@ -96,34 +96,6 @@ void closeBlinds() {
   trendCount = 0;
 }
 
-bool doSteps() {
-  int steps = 0;
-  if (config.currentStepCount < targetStepCount) {
-    steps = STEPS_PER_REV / 100;
-    if (config.currentStepCount + steps > targetStepCount)
-      steps = targetStepCount - config.currentStepCount;
-  } else if (config.currentStepCount > targetStepCount) {
-    steps = STEPS_PER_REV / -100;
-    if (config.currentStepCount + steps < targetStepCount)
-      steps = targetStepCount - config.currentStepCount;
-  }
-
-  if (steps != 0) {
-    Sprint("STEPPING ");
-    Sprintln(steps);
-    stepper.step(steps);
-    config.currentStepCount += steps;
-
-    if (config.currentStepCount == targetStepCount) {
-        Sprintln("At target position.  Saving...");
-        motorOff();
-        EEPROM.put( offsetof(eeprom_config, currentStepCount), config.currentStepCount);
-    }
-    return true;
-  }
-  return false;
-}
-
 
 // direct control of blinds with the two buttons.
 // Move blinds to the open position and press both buttons to reset step count.
@@ -163,6 +135,7 @@ void setup_loop() {
       } else {
         Sprintln("Calibration complete.");
         targetStepCount = config.currentStepCount = config.fullStepCount;
+        EEPROM.put( offsetof(eeprom_config, version), 1);
         EEPROM.put( offsetof(eeprom_config, fullStepCount), config.fullStepCount);
         EEPROM.put( offsetof(eeprom_config, currentStepCount), config.currentStepCount);  
 
@@ -177,62 +150,110 @@ void setup_loop() {
 }
 
 
-void normal_loop() {
-  int button1 = digitalRead(BUTTON1_PIN);
-  int button2 = digitalRead(BUTTON2_PIN);
-  
-  int analogValue = analogRead(PHOTOCELL_PIN);
-  int value = map(analogValue, sensorMin, sensorMax, 0, 100);
-  Sprint("MODE 2:  ");
-  if (blindsOpen())
-    Sprint("OPEN  ");
-  else
-    Sprint("CLOSED  ");
-  if (blindOverride)
-    Sprint(" (OVERRIDE) ");
-  Sprint("  Light Level: "); Sprint(analogValue);  Sprint("  Adjusted: ");
-  Sprint(value);  Sprint("   Trend: ");
-  Sprintln(trendCount);
+unsigned long input_lockout_time = 0;
+void handle_input() {
+  if (millis() - input_lockout_time > 2000ul) {
+    int button1 = digitalRead(BUTTON1_PIN);
+    int button2 = digitalRead(BUTTON2_PIN);
 
-  if (button1 == LOW || button2 == LOW) {
-    blindOverride = !blindOverride;
-    digitalWrite(LED_PIN, blindOverride);
-    delay(1000);
-    
-    if (blindsOpen())
-      closeBlinds();
-    else
-      openBlinds();
-  }
-  
-  if (!blindOverride) {
-    if (blindsOpen()) {
-      if (value < TRANSITION_LEVEL)
-        trendCount ++;
-      else
-        trendCount = 0;
-  
-      if (trendCount >= 5) {
+    if (button1 == LOW || button2 == LOW) {
+      blindOverride = !blindOverride;
+      input_lockout_time = millis();
+      digitalWrite(LED_PIN, blindOverride);
+      
+      if (blindsOpen())
         closeBlinds();
-      }
-    } else {
-      if (value > TRANSITION_LEVEL)
-        trendCount ++;
       else
-        trendCount = 0;
-  
-      if (trendCount >= 5) {
         openBlinds();
-      }
     }
   }
-  
-  if (doSteps())
-    delay (10);
-  else
-    delay (1000);
 }
 
+unsigned long last_sensor_time = 0;
+void check_sensors() {
+    if (blindOverride)
+      return;
+
+    if(millis() - last_sensor_time > 1000ul) {
+        last_sensor_time = millis();
+
+        int analogValue = analogRead(PHOTOCELL_PIN);
+        int value = map(analogValue, sensorMin, sensorMax, 0, 100);
+
+        Sprint("MODE 2:  ");
+        if (blindsOpen())
+          Sprint("OPEN  ");
+        else
+          Sprint("CLOSED  ");
+        Sprint("  Light Level: "); Sprint(analogValue);  Sprint("  Adjusted: ");
+        Sprint(value);  Sprint("   Trend: ");
+        Sprintln(trendCount);
+      
+        if (blindsOpen()) {
+          if (value < TRANSITION_LEVEL)
+            trendCount ++;
+          else
+            trendCount = 0;
+      
+          if (trendCount >= 5) {
+            closeBlinds();
+          }
+        } else {
+          if (value > TRANSITION_LEVEL)
+            trendCount ++;
+          else
+            trendCount = 0;
+      
+          if (trendCount >= 5) {
+            openBlinds();
+          }
+        }
+
+    }
+}
+
+bool do_steps() {
+  int steps = 0;
+  if (config.currentStepCount < targetStepCount) {
+    steps = STEPS_PER_REV / 100;
+    if (config.currentStepCount + steps > targetStepCount)
+      steps = targetStepCount - config.currentStepCount;
+  } else if (config.currentStepCount > targetStepCount) {
+    steps = STEPS_PER_REV / -100;
+    if (config.currentStepCount + steps < targetStepCount)
+      steps = targetStepCount - config.currentStepCount;
+  }
+
+  if (steps != 0) {
+    Sprint("STEPPING ");
+    Sprintln(steps);
+    stepper.step(steps);
+    config.currentStepCount += steps;
+
+    if (config.currentStepCount == targetStepCount) {
+        Sprintln("At target position.  Saving...");
+        motorOff();
+        EEPROM.put( offsetof(eeprom_config, currentStepCount), config.currentStepCount);
+    }
+    return true;
+  }
+  return false;
+}
+
+
+void normal_loop() {
+  // check manual input
+  // if we are past the lockout delay, check for input.
+  handle_input();
+
+  // check sensor input
+  // if it has been 1 second since the last check, poll new values.   1 second delay is important for trending.
+  check_sensors();
+
+  // perform steps
+  // if we are not at the target yet, take an incremental step.
+  do_steps();
+}
 
 void loop() {
   switch (mode) {
