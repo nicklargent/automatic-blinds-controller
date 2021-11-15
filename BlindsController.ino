@@ -1,3 +1,4 @@
+#include <stddef.h>
 #include <EEPROM.h>
 #include <Stepper.h>
 
@@ -17,11 +18,16 @@ const int BUTTON1_PIN = 2;
 const int BUTTON2_PIN = 3;
 const int LED_PIN = LED_BUILTIN; //6;
 
-#define TRANSITION_LEVEL 10
+const int TRANSITION_LEVEL = 10;
 
+#if 0
+#define Sprint(a) (Serial.print(a))
+#define Sprintln(a) (Serial.println(a))
+#else
+#define Sprint(a)
+#define Sprintln(a)
+#endif
 
-#define Sprint(a) //(Serial.print(a))
-#define Sprintln(a) //(Serial.println(a))
 
 // create an instance of the stepper class, specifying
 // the number of steps of the motor and the pins it's
@@ -31,6 +37,7 @@ bool blindOverride = false;
 int trendCount = 0;
 bool stepCountSet = false;
 long targetStepCount = 0;
+int targetPercent = 0;
 
 eeprom_config config;
 
@@ -58,6 +65,7 @@ void setup() {
   EEPROM.get( offsetof(eeprom_config, currentStepCount), config.currentStepCount);
   if (config.version == 1) {
     targetStepCount = config.currentStepCount;
+    targetPercent = targetStepCount / config.fullStepCount * 100.0;
   } else {
     targetStepCount = config.currentStepCount = config.fullStepCount = 0;
     mode = SETUP;
@@ -80,19 +88,35 @@ void motorOff() {
   digitalWrite(11,LOW);
 }
 
-bool blindsOpen() {
+void setBlinds(int percentClosed) {
+  // 0 - fully open
+  // 100 - fully closed
+  // set targetStepCount based on 0 steps being open and fullStepCount being closed.  
+  // Note that fullStepCount may be positive or negative.
+
+  targetPercent = percentClosed;
+  if (targetPercent < 0) targetPercent = 0;
+  if (targetPercent > 100) targetPercent = 100;
+  targetStepCount = (long)(config.fullStepCount * targetPercent / 100.0);
+}
+
+bool blindsFullyOpen() {
   return (targetStepCount == 0);
+}
+
+bool blindsFullyClosed() {
+  return (targetStepCount == config.fullStepCount);
 }
 
 void openBlinds() {
   Sprintln("Opening Blinds...");
-  targetStepCount = 0;
+  setBlinds(0);
   trendCount = 0;
 }
 
 void closeBlinds() {
   Sprintln("Closing Blinds...");
-  targetStepCount = config.fullStepCount;
+  setBlinds(100);
   trendCount = 0;
 }
 
@@ -135,6 +159,7 @@ void setup_loop() {
       } else {
         Sprintln("Calibration complete.");
         targetStepCount = config.currentStepCount = config.fullStepCount;
+        targetPercent = 100;
         EEPROM.put( offsetof(eeprom_config, version), 1);
         EEPROM.put( offsetof(eeprom_config, fullStepCount), config.fullStepCount);
         EEPROM.put( offsetof(eeprom_config, currentStepCount), config.currentStepCount);  
@@ -150,21 +175,36 @@ void setup_loop() {
 }
 
 
-unsigned long input_lockout_time = 0;
+bool btn1Pressed = false;
+bool btn2Pressed = false;
 void handle_input() {
-  if (millis() - input_lockout_time > 2000ul) {
-    int button1 = digitalRead(BUTTON1_PIN);
-    int button2 = digitalRead(BUTTON2_PIN);
+  int button1 = digitalRead(BUTTON1_PIN);
+  if (button1 == LOW && !btn1Pressed) {
+    btn1Pressed = true;
+    blindOverride = true;
+    digitalWrite(LED_PIN, blindOverride);
+    setBlinds(targetPercent + 25);
+    Sprint("target step: "); Sprint(targetStepCount); Sprint(" / "); Sprintln(config.fullStepCount);
+  } else if (button1 == HIGH && btn1Pressed) {
+    btn1Pressed = false;
+  }
+  
+  int button2 = digitalRead(BUTTON2_PIN);
+  if (button2 == LOW && !btn2Pressed) {
+    btn2Pressed = true;
+    blindOverride = true;
+    digitalWrite(LED_PIN, blindOverride);
+    setBlinds(targetPercent - 25);
+    Sprint("target step: "); Sprint(targetStepCount); Sprint(" / "); Sprintln(config.fullStepCount);
+  } else if (button2 == HIGH && btn2Pressed) {
+    btn2Pressed = false;
+  }
 
-    if (button1 == LOW || button2 == LOW) {
-      blindOverride = !blindOverride;
-      input_lockout_time = millis();
+  if (blindOverride) {
+    if (button1 == LOW && button2 == LOW) {
+      blindOverride = false;
       digitalWrite(LED_PIN, blindOverride);
-      
-      if (blindsOpen())
-        closeBlinds();
-      else
-        openBlinds();
+      Sprint("target step: "); Sprint(targetStepCount); Sprint(" / "); Sprintln(config.fullStepCount);
     }
   }
 }
@@ -181,15 +221,17 @@ void check_sensors() {
         int value = map(analogValue, sensorMin, sensorMax, 0, 100);
 
         Sprint("MODE 2:  ");
-        if (blindsOpen())
+        if (blindsFullyOpen())
           Sprint("OPEN  ");
-        else
+        else if (blindsFullyClosed())
           Sprint("CLOSED  ");
+        else
+          Sprint("CUSTOM");
         Sprint("  Light Level: "); Sprint(analogValue);  Sprint("  Adjusted: ");
         Sprint(value);  Sprint("   Trend: ");
         Sprintln(trendCount);
       
-        if (blindsOpen()) {
+        if (blindsFullyOpen()) {
           if (value < TRANSITION_LEVEL)
             trendCount ++;
           else
@@ -198,7 +240,7 @@ void check_sensors() {
           if (trendCount >= 5) {
             closeBlinds();
           }
-        } else {
+        } else if (blindsFullyClosed()) {
           if (value > TRANSITION_LEVEL)
             trendCount ++;
           else
@@ -207,12 +249,17 @@ void check_sensors() {
           if (trendCount >= 5) {
             openBlinds();
           }
+        } else {
+          if (value < TRANSITION_LEVEL)
+            closeBlinds();
+          else
+            openBlinds();
         }
 
     }
 }
 
-bool do_steps() {
+void do_steps() {
   int steps = 0;
   if (config.currentStepCount < targetStepCount) {
     steps = STEPS_PER_REV / 100;
@@ -225,8 +272,8 @@ bool do_steps() {
   }
 
   if (steps != 0) {
-    Sprint("STEPPING ");
-    Sprintln(steps);
+    //Sprint("STEPPING ");
+    //Sprintln(steps);
     stepper.step(steps);
     config.currentStepCount += steps;
 
@@ -235,9 +282,7 @@ bool do_steps() {
         motorOff();
         EEPROM.put( offsetof(eeprom_config, currentStepCount), config.currentStepCount);
     }
-    return true;
   }
-  return false;
 }
 
 
